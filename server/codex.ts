@@ -2516,6 +2516,46 @@ async function loadedConversation(screen: string, weighed: readonly string[], ho
 const boundRollouts = new Map<string, { processes: string; path: string; at: number; titled?: boolean }>();
 
 /**
+ * c7:s04 What each pane's screen showed when its binding was last proven by a match (matchCodexTranscript, s02's
+ * c7FootedTail or s03's c7FootedShort), under which processes and to which rollout: the /new guard in
+ * codexTranscriptPath keeps a binding while the pane still shows exactly that (c7Unmoved).
+ */
+const c7Proofs = new Map<string, { processes: string; path: string; shown: string }>();
+
+/**
+ * c7:s04 A screen as c7Unmoved compares it: the rows down to the composer (the last row Codex starts with "\u203a",
+ * holding any draft), whitespace removed. The rows under it are left out (the model row and the hint row, which the
+ * pane's width cuts), and so are line breaks and indents, which only the width moves.
+ */
+function c7Shown(screen: string): string {
+  const lines = screen.split("\n");
+  const composer = lines.findLastIndex((line) => line.startsWith("\u203a"));
+  return (composer >= 0 ? lines.slice(0, composer + 1) : lines).join("").replace(/\s+/g, "");
+}
+
+/**
+ * c7:s04 Remembers the screen that proved this pane's binding to path. A screen that proves nothing and differs from
+ * the remembered one forgets it: the pane moved on, and what it showed then never vouches for it again.
+ */
+function c7NoteProof(paneId: string, processes: string, path: string | null, screen: string): void {
+  const shown = c7Shown(screen);
+  if (path === null || processes === "") {
+    if (c7Proofs.get(paneId)?.shown !== shown) c7Proofs.delete(paneId);
+    return;
+  }
+  c7Proofs.delete(paneId);
+  c7Proofs.set(paneId, { processes, path, shown });
+  if (c7Proofs.size > 64) c7Proofs.delete(c7Proofs.keys().next().value!);
+}
+
+/** c7:s04 Whether the pane, under the same processes, still shows the very screen that proved its binding to path. */
+export function c7Unmoved(paneId: string, processes: string, path: string, screen: string): boolean {
+  const proof = c7Proofs.get(paneId);
+  return proof !== undefined && processes !== "" && proof.processes === processes && proof.path === path && proof.shown === c7Shown(screen);
+}
+
+
+/**
  * Threads begun in this cwd since `since` (seconds) that this pane's Codex may have moved
  * on to (/new), as their rollouts. Only interactive threads count: subagents (often with
  * a NULL agent_role) and `codex exec` runs share their parent's cwd but never replace the
@@ -3247,6 +3287,9 @@ export async function codexTranscriptPath(paneId: string, cwd: string, home = de
   // c7:s02 a long answer (its start scrolled off the screen) or one Codex draws as a code block (indented, no bullet) is never shown whole in one block
   const matched = screen ? (matchCodexTranscript(screen.text, candidates, new Set(titledElsewhere === null ? [] : [titledElsewhere]), new Map(), false, folderRollouts)
     ?? c7FootedTail(screen.text, candidates, titledElsewhere, folderRollouts, reported)) : null;
+  // c7:s04 the screen that proves this pane's binding, for the /new guard below (c7Unmoved)
+  if (screen) c7NoteProof(paneId, processes, matched ?? c7FootedShort(screen.text, candidates, titledElsewhere, folderRollouts, reported), screen.text);
+
   // c7:s03 an answer under 64 letters and digits ("확인", "ok") has no anchor for the match above, nor for s02
   const c7Short = matched === null && screen ? c7FootedShort(screen.text, candidates, titledElsewhere, folderRollouts, reported) : null;
   if (c7Short !== null) {
@@ -3274,6 +3317,12 @@ export async function codexTranscriptPath(paneId: string, cwd: string, home = de
     boundNewer = theirs(boundNewer, paneId, claimed);
     resumedNewer = theirs(resumedNewer, paneId, claimed);
   }
+  // c7:s04 a thread begun since in this cwd is no /new of this pane while the pane, under the same processes, still
+  // shows the very screen that proved its binding: /new redraws the screen at once (live 2026-11-07, Codex 0.164: the
+  // logo replaces the turns, and the thread is made then), and every later turn redraws it again. So a second Codex
+  // started here, whose short answer ("\ud655\uc778") its own pane cannot claim, no longer unbinds this pane
+  if (boundHere !== undefined && boundNewer.length > 0 && screen !== null && c7Unmoved(paneId, processes, boundHere.path, screen.text)) boundNewer = [];
+
   if (boundHere !== undefined && boundNewer.length === 0 && codexRolloutPath(boundHere.path, home) !== null) {
     // a pane in use stays among the kept ones
     boundRollouts.delete(paneId);
