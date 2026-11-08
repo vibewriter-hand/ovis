@@ -311,6 +311,37 @@ function maskedPromptAtAnyWidth(screen: string): boolean {
   return [Infinity, ...(above > 0 ? [above, above + 1] : [])].some((columns) => secretPrompt(screen, columns) !== null);
 }
 
+// c7:s07 Claude Code folds a pasted message into "[Pasted text #N +K lines]" (K = its line breaks; none: "[Pasted text #N]").
+// A send cancelled before its answer (Esc, an interrupted request) is put back in the input box as that placeholder,
+// not dim (live 11-07 14:43 -> 15:21, the author's R5-Q1 answer; reproduced in a test pane). Ovis takes any
+// placeholder for a draft and refuses, so the phone asks every time (author 11-07 15:21 capture). When the box holds
+// nothing but one placeholder whose line breaks match the chat's last message to this pane, it is that message:
+// the new one goes after it, and Claude gets both. Nothing is cleared, so nothing the user wrote is lost.
+const C7_PASTE_ROW_RE = /^\[Pasted text #\d+(?: \+(\d+) lines?)?\]$/;
+
+export function c7OwnPaste(live: string, sent: string | null): boolean {
+  if (sent === null || sent.trim() === "") return false;
+  const box = claudeInputBoxContent(live);
+  if (box === null || box.includes("\n") || !box.startsWith("❯")) return false;
+  const match = C7_PASTE_ROW_RE.exec(box.slice(1).replace(/ /g, " ").trim());
+  if (match === null) return false;
+  const breaks = (text: string): number => (text.match(/\r\n|\r|\n/g) ?? []).length;
+  const shown = match[1] === undefined ? 0 : Number(match[1]);
+  return shown === breaks(sent) || shown === breaks(sent.trim());
+}
+
+/** The live screen when Claude's box holds only the chat's own last message as a placeholder (c7OwnPaste), else null. */
+async function c7OwnPasteScreen(paneId: string): Promise<string | null> {
+  const sent = lastChatSubmitted(paneId);
+  if (sent === null) return null;
+  try {
+    const [live] = await claudeBoxReads(paneId);
+    return c7OwnPaste(live, sent) ? live : null;
+  } catch {
+    return null; // the usual checks read the box again and refuse as they do
+  }
+}
+
 export function createSubmitText({ options, lastTyped, attachments, terminalAttach, SUBMIT_DEADLINE_MS, TYPED_SETTLE_MS, DRAFT_CLEAR_WAIT_MS, DRAFT_CLEAR_POLL_MS, SUBMIT_DELAY_MS }: {
   options: { submitDeadlineMs?: number; submitDelayMs?: number; ompReportPollMs?: number; ompStartupMs?: number; openCodeStateDir?: string };
   lastTyped: Map<string, number>;
@@ -422,7 +453,11 @@ export function createSubmitText({ options, lastTyped, attachments, terminalAtta
         seen = claudeRoots?.processes;
         // the process lookup waited on herdr: the device may have lost its access meanwhile
         inTime();
-        if (claude && !sendAnyway) {
+        // c7:s07 the chat's own last message, put back by Claude Code as a paste placeholder after its send was
+        // cancelled before an answer, is sent again with this one (appended, as Send anyway does), not refused
+        const c7OwnPaste = claude && !sendAnyway && clearDraft === undefined ? await c7OwnPasteScreen(paneId) : null;
+        if (c7OwnPaste !== null) { beforeScreen = c7OwnPaste; inTime(); }
+        if (claude && !sendAnyway && c7OwnPaste === null) {
           if (clearDraft === undefined) {
             try {
               await freeClaudeBox(paneId, pane?.agent_status === "working", authorize, arrivedAt + (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS));
